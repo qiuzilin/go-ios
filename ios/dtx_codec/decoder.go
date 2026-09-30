@@ -8,6 +8,7 @@ import (
 
 	"github.com/danielpaulus/go-ios/ios/golog"
 	"github.com/danielpaulus/go-ios/ios/nskeyedarchiver"
+	plist "howett.net/plist"
 )
 
 // maxMessageSize caps how many bytes ReadMessage will allocate for any single
@@ -228,10 +229,17 @@ func (d Message) parsePayloadBytes(messageBytes []byte) ([]interface{}, error) {
 	return d.decodePayload(messageBytes[offset:])
 }
 
-// Live reads and reassembled fragments must decode raw Instruments payloads
-// identically, so CoreProfile event buffers never enter the plist decoder.
+// Live reads and reassembled fragments must decode Instruments payloads
+// identically. Type-one messages may contain either binary plists or raw
+// CoreProfile event buffers, so only the plist signature is decoded.
 func (d Message) decodePayload(payloadBytes []byte) ([]interface{}, error) {
 	if d.PayloadHeader.MessageType == UnknownTypeOne {
+		if bytes.HasPrefix(payloadBytes, []byte("bplist00")) {
+			var decoded interface{}
+			if err := plist.NewDecoder(bytes.NewReader(payloadBytes)).Decode(&decoded); err == nil {
+				return []interface{}{decoded}, nil
+			}
+		}
 		return []interface{}{payloadBytes}, nil
 	}
 	if d.PayloadHeader.MessageType == LZ4CompressedMessage {

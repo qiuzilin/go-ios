@@ -10,6 +10,7 @@ import (
 	"github.com/danielpaulus/go-ios/ios/golog"
 	"github.com/danielpaulus/go-ios/ios/nskeyedarchiver"
 	"github.com/stretchr/testify/assert"
+	plist "howett.net/plist"
 )
 
 func TestErrors(t *testing.T) {
@@ -124,6 +125,9 @@ func TestType1Message(t *testing.T) {
 		if !assert.NoError(t, err) {
 			t.Fatal("whet", err)
 		}
+		if assert.NotEmpty(t, msg.Payload) {
+			assert.IsType(t, []byte{}, msg.Payload[0])
+		}
 		// Live connections use the blocking reader, including raw CoreProfile
 		// messages that are not NSKeyedArchiver property lists.
 		blocking, err := dtx.ReadMessage(bytes.NewReader(msg.RawBytes))
@@ -132,6 +136,31 @@ func TestType1Message(t *testing.T) {
 			assert.Equal(t, msg.Payload, blocking.Payload)
 		}
 	}
+}
+
+func TestTypeOneBinaryPlist(t *testing.T) {
+	var payload bytes.Buffer
+	want := map[string]interface{}{"CPUCount": uint64(8), "CPUUsage": 42.5}
+	if err := plist.NewBinaryEncoder(&payload).Encode(want); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := dtx.Encode(1, 0, 0, false, dtx.UnknownTypeOne, payload.Bytes(), dtx.NewPrimitiveDictionary())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nonBlocking, remaining, err := dtx.DecodeNonBlocking(encoded)
+	if !assert.NoError(t, err) {
+		t.Fatal(err)
+	}
+	assert.Empty(t, remaining)
+	assert.Equal(t, want, nonBlocking.Payload[0])
+
+	blocking, err := dtx.ReadMessage(bytes.NewReader(encoded))
+	if !assert.NoError(t, err) {
+		t.Fatal(err)
+	}
+	assert.Equal(t, want, blocking.Payload[0])
 }
 
 func TestFragmentedMessage(t *testing.T) {
