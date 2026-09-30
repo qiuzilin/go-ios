@@ -82,6 +82,9 @@ Releases are **dispatch-only** — merging a PR never ships anything.
 
 ## Rules
 
+- Commits authored for the `qiuzilin/go-ios` fork must use GitHub identity
+  `qiuzilin <q_zlin@foxmail.com>` for both author and committer. Never use a
+  `lizhi.fm` address. Verify the repository-local Git identity before committing.
 - Publishing uses npm OIDC trusted publishing (registered per-package on
   npmjs.com). Do not add an npm auth token — even an empty `NODE_AUTH_TOKEN`
   env var or an `.npmrc` token line breaks OIDC.
