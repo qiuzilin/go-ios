@@ -124,6 +124,13 @@ func TestType1Message(t *testing.T) {
 		if !assert.NoError(t, err) {
 			t.Fatal("whet", err)
 		}
+		// Live connections use the blocking reader, including raw CoreProfile
+		// messages that are not NSKeyedArchiver property lists.
+		blocking, err := dtx.ReadMessage(bytes.NewReader(msg.RawBytes))
+		if assert.NoError(t, err) {
+			assert.Equal(t, msg.PayloadHeader, blocking.PayloadHeader)
+			assert.Equal(t, msg.Payload, blocking.Payload)
+		}
 	}
 }
 

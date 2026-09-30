@@ -96,7 +96,7 @@ func ReadMessage(reader io.Reader) (Message, error) {
 			return Message{}, err
 		}
 
-		payload, err := nskeyedarchiver.Unarchive(payloadBytes)
+		payload, err := result.decodePayload(payloadBytes)
 		if err != nil {
 			return Message{}, err
 		}
@@ -225,19 +225,25 @@ func (d Message) parsePayloadBytes(messageBytes []byte) ([]interface{}, error) {
 	if !d.HasAuxiliary() && d.HasPayload() {
 		offset = 48
 	}
+	return d.decodePayload(messageBytes[offset:])
+}
+
+// Live reads and reassembled fragments must decode raw Instruments payloads
+// identically, so CoreProfile event buffers never enter the plist decoder.
+func (d Message) decodePayload(payloadBytes []byte) ([]interface{}, error) {
 	if d.PayloadHeader.MessageType == UnknownTypeOne {
-		return []interface{}{messageBytes[offset:]}, nil
+		return []interface{}{payloadBytes}, nil
 	}
 	if d.PayloadHeader.MessageType == LZ4CompressedMessage {
-		uncompressed, err := Decompress(messageBytes[offset:])
+		uncompressed, err := Decompress(payloadBytes)
 		if err == nil {
-			golog.Info("lz4 decompressed message", "module", logModule, "compressed", len(messageBytes[offset:]), "uncompressed", len(uncompressed))
+			golog.Info("lz4 decompressed message", "module", logModule, "compressed", len(payloadBytes), "uncompressed", len(uncompressed))
 		} else {
-			golog.Info("skipping lz4 compressed msg", "module", logModule, "bytes", len(messageBytes[offset:]), "error", err)
+			golog.Info("skipping lz4 compressed msg", "module", logModule, "bytes", len(payloadBytes), "error", err)
 		}
-		return []interface{}{messageBytes[offset:]}, nil
+		return []interface{}{payloadBytes}, nil
 	}
-	return nskeyedarchiver.Unarchive(messageBytes[offset:])
+	return nskeyedarchiver.Unarchive(payloadBytes)
 }
 
 // PayloadLength equals PayloadHeader.TotalPayloadLength - d.PayloadHeader.AuxiliaryLength so it is the Payload without the Auxiliary.
