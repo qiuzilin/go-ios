@@ -34,10 +34,22 @@ type Tunnel struct {
 	RsdPort int `json:"rsdPort"`
 	// Udid is the id of the device for this tunnel
 	Udid string `json:"udid"`
+	// ConnectionType records the device transport used to establish this tunnel.
+	ConnectionType string `json:"connectionType,omitempty"`
 	// Userspace TUN device is used, connect to the local tcp port at Default
 	UserspaceTUN     bool `json:"userspaceTun"`
 	UserspaceTUNPort int  `json:"userspaceTunPort"`
 	closer           func() error
+	closed           <-chan struct{}
+}
+
+func (t Tunnel) isClosed() bool {
+	select {
+	case <-t.closed:
+		return true
+	default:
+		return false
+	}
 }
 
 // Close closes the connection to the device and removes the virtual network interface from the host

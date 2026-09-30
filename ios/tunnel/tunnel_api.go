@@ -314,17 +314,20 @@ func RefreshTunnelForDevice(udid string, tunnelInfoHost string, tunnelInfoPort i
 // failedDevice tracks a device whose tunnel failed to start, so retries can be
 // backed off instead of attempted every UpdateTunnels cycle (each attempt opens
 // a usbmux socket, so hammering a device that always fails leaks sockets).
+// Backoff is isolated by transport so a USB failure cannot suppress Wi-Fi.
 type failedDevice struct {
-	lastAttempt time.Time
-	failCount   int
+	lastAttempt    time.Time
+	failCount      int
+	connectionType string
 }
 
 type TunnelManager struct {
-	ts      tunnelStarter
-	dl      deviceLister
-	pm      PairRecordManager
-	mux     sync.Mutex
-	tunnels map[string]Tunnel
+	ts                tunnelStarter
+	dl                deviceLister
+	getProductVersion func(ios.DeviceEntry) (*semver.Version, error)
+	pm                PairRecordManager
+	mux               sync.Mutex
+	tunnels           map[string]Tunnel
 	// failedDevices tracks devices whose tunnel start failed (keyed by udid) so
 	// UpdateTunnels can back off before retrying them.
 	failedDevices        map[string]failedDevice
@@ -364,6 +367,7 @@ func newTunnelManager(pm PairRecordManager, userspaceTUN bool, udidFilter string
 	return &TunnelManager{
 		ts:                 manualPairingTunnelStart{},
 		dl:                 deviceList{},
+		getProductVersion:  ios.GetProductVersion,
 		pm:                 pm,
 		tunnels:            map[string]Tunnel{},
 		failedDevices:      map[string]failedDevice{},
@@ -425,26 +429,38 @@ func (m *TunnelManager) UpdateTunnels(ctx context.Context) error {
 		return fmt.Errorf("UpdateTunnels: failed to get list of devices: %w", err)
 	}
 
-	// currentUDIDs holds every connected device (built before the udidFilter
-	// check) so stale failedDevices entries for now-disconnected devices can be
-	// pruned below, letting a reconnect retry immediately.
-	currentUDIDs := make(map[string]bool, len(devices.DeviceList))
-	for _, d := range devices.DeviceList {
+	// Keep every reported UDID for pruning failure state, but choose one entry
+	// per device for tunnel management. Prefer USB while both transports exist.
+	selectedDevices := selectTunnelDevices(devices.DeviceList)
+	currentUDIDs := make(map[string]bool, len(selectedDevices))
+	for _, d := range selectedDevices {
 		currentUDIDs[d.Properties.SerialNumber] = true
 	}
 
-	for _, d := range devices.DeviceList {
+	for _, d := range selectedDevices {
 		udid := d.Properties.SerialNumber
 		if m.udidFilter != "" && udid != m.udidFilter {
 			continue
 		}
-		if _, exists := localTunnels[udid]; exists {
-			continue
+		if existing, exists := localTunnels[udid]; exists {
+			closed := existing.isClosed()
+			if !closed && (existing.ConnectionType == "" || existing.ConnectionType == d.Properties.ConnectionType) {
+				continue
+			}
+			if closed {
+				golog.Info("restarting closed tunnel", "module", logModule, "udid", udid,
+					"connectionType", d.Properties.ConnectionType)
+			} else {
+				golog.Info("restarting tunnel after device transport changed", "module", logModule, "udid", udid,
+					"from", existing.ConnectionType, "to", d.Properties.ConnectionType)
+			}
+			if err := m.stopTunnel(existing); err != nil {
+				golog.Warn("failed to stop stale tunnel", "module", logModule, "udid", udid, "error", err)
+			}
+			delete(localTunnels, udid)
 		}
-		// Skip network devices (they can't tunnel) and devices still inside their
-		// failure backoff window. Either way, attempting a tunnel here would open
-		// a usbmux socket (via GetProductVersion) that, for a device that always
-		// fails, accumulates as a leaked socket every cycle.
+		// Failed starts are backed off because device calls may leave a usbmux
+		// connection open when the device disconnects during setup.
 		if shouldSkipDevice(d, localFailed, time.Now()) {
 			continue
 		}
@@ -458,10 +474,20 @@ func (m *TunnelManager) UpdateTunnels(ctx context.Context) error {
 		if err != nil {
 			golog.Warn("failed to start tunnel", "module", logModule, "udid", udid, "error", err)
 			m.mux.Lock()
-			m.failedDevices[udid] = failedDevice{lastAttempt: time.Now(), failCount: m.failedDevices[udid].failCount + 1}
+			previous := m.failedDevices[udid]
+			failCount := 1
+			if previous.connectionType == d.Properties.ConnectionType {
+				failCount += previous.failCount
+			}
+			m.failedDevices[udid] = failedDevice{
+				lastAttempt:    time.Now(),
+				failCount:      failCount,
+				connectionType: d.Properties.ConnectionType,
+			}
 			m.mux.Unlock()
 			continue
 		}
+		t.ConnectionType = d.Properties.ConnectionType
 		m.mux.Lock()
 		delete(m.failedDevices, udid)
 		localTunnels[udid] = t
@@ -487,14 +513,28 @@ func (m *TunnelManager) UpdateTunnels(ctx context.Context) error {
 	return nil
 }
 
-// shouldSkipDevice reports whether UpdateTunnels should not attempt a tunnel for
-// d on this cycle: network-connected devices can never establish a tunnel, and a
-// device that recently failed is held off until its backoff window elapses.
-func shouldSkipDevice(d ios.DeviceEntry, failed map[string]failedDevice, now time.Time) bool {
-	if d.Properties.ConnectionType == "Network" {
-		return true
+func selectTunnelDevices(devices []ios.DeviceEntry) []ios.DeviceEntry {
+	selected := make([]ios.DeviceEntry, 0, len(devices))
+	indexes := make(map[string]int, len(devices))
+	for _, d := range devices {
+		udid := d.Properties.SerialNumber
+		index, exists := indexes[udid]
+		if !exists {
+			indexes[udid] = len(selected)
+			selected = append(selected, d)
+		} else if selected[index].Properties.ConnectionType != "USB" && d.Properties.ConnectionType == "USB" {
+			selected[index] = d
+		}
 	}
-	if f, ok := failed[d.Properties.SerialNumber]; ok && now.Sub(f.lastAttempt) < failedDeviceBackoff(f.failCount) {
+	return selected
+}
+
+// shouldSkipDevice reports whether UpdateTunnels should hold off retrying a
+// device whose tunnel recently failed.
+func shouldSkipDevice(d ios.DeviceEntry, failed map[string]failedDevice, now time.Time) bool {
+	if f, ok := failed[d.Properties.SerialNumber]; ok &&
+		(f.connectionType == "" || f.connectionType == d.Properties.ConnectionType) &&
+		now.Sub(f.lastAttempt) < failedDeviceBackoff(f.failCount) {
 		return true
 	}
 	return false
@@ -545,7 +585,11 @@ func (m *TunnelManager) startTunnel(ctx context.Context, device ios.DeviceEntry)
 	golog.Info("start tunnel", "module", logModule, "udid", device.Properties.SerialNumber)
 	startTunnelCtx, cancel := context.WithTimeout(ctx, m.startTunnelTimeout)
 	defer cancel()
-	version, err := ios.GetProductVersion(device)
+	getProductVersion := m.getProductVersion
+	if getProductVersion == nil {
+		getProductVersion = ios.GetProductVersion
+	}
+	version, err := getProductVersion(device)
 	if err != nil {
 		return Tunnel{}, fmt.Errorf("startTunnel: failed to get device version: %w", err)
 	}

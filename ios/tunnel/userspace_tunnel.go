@@ -268,6 +268,7 @@ func connectToUserspaceTunnelLockdown(ctx context.Context, device ios.DeviceEntr
 		RsdPort: int(tunnelInfo.ServerRSDPort),
 		Udid:    device.Properties.SerialNumber,
 		closer:  closeFunc,
+		closed:  statsDone,
 	}, nil
 }
 
