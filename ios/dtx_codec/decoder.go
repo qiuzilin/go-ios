@@ -237,6 +237,12 @@ func (d Message) decodePayload(payloadBytes []byte) ([]interface{}, error) {
 		if bytes.HasPrefix(payloadBytes, []byte("bplist00")) {
 			var decoded interface{}
 			if err := plist.NewDecoder(bytes.NewReader(payloadBytes)).Decode(&decoded); err == nil {
+				if archive, ok := decoded.(map[string]interface{}); ok && archive["$archiver"] == nskeyedarchiver.NsKeyedArchiver {
+					if unarchived, err := nskeyedarchiver.Unarchive(payloadBytes); err == nil {
+						return unarchived, nil
+					}
+					return []interface{}{payloadBytes}, nil
+				}
 				return []interface{}{decoded}, nil
 			}
 		}

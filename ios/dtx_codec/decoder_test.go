@@ -163,6 +163,30 @@ func TestTypeOneBinaryPlist(t *testing.T) {
 	assert.Equal(t, want, blocking.Payload[0])
 }
 
+func TestTypeOneKeyedArchivePlist(t *testing.T) {
+	want := []interface{}{
+		map[string]interface{}{
+			"CPUCount":       uint64(6),
+			"SystemCPUUsage": map[string]interface{}{"CPU_TotalLoad": 120.0},
+		},
+	}
+	payload, err := nskeyedarchiver.ArchiveBin(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := dtx.Encode(2, 0, 0, false, dtx.UnknownTypeOne, payload, dtx.NewPrimitiveDictionary())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msg, remaining, err := dtx.DecodeNonBlocking(encoded)
+	if !assert.NoError(t, err) {
+		t.Fatal(err)
+	}
+	assert.Empty(t, remaining)
+	assert.Equal(t, []interface{}{want}, msg.Payload)
+}
+
 func TestFragmentedMessage(t *testing.T) {
 	dat, err := os.ReadFile("fixtures/fragmentedmessage.bin")
 	if err != nil {
