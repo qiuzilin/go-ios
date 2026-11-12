@@ -62,18 +62,12 @@ func NewPairRecordManager(p string) (PairRecordManager, error) {
 // StoreDeviceInfo stores the provided Device info as a plist encoded file in the `peers/` directory
 func (p PairRecordManager) StoreDeviceInfo(d device) error {
 	devicePath := path.Join(p.peersLocation, fmt.Sprintf("%s.plist", d.Identifier))
-	f, err := os.OpenFile(devicePath, os.O_CREATE|os.O_WRONLY, 0o644)
+	tmp, err := writePairRecordTemp(devicePath, d)
 	if err != nil {
-		return fmt.Errorf("StoreDeviceInfo: could open file for writing: %w", err)
+		return fmt.Errorf("StoreDeviceInfo: %w", err)
 	}
-	defer f.Close()
-
-	enc := plist.NewEncoderForFormat(f, plist.BinaryFormat)
-	err = enc.Encode(d)
-	if err != nil {
-		return fmt.Errorf("StoreDeviceInfo: could not encode device info: %w", err)
-	}
-	return nil
+	defer os.Remove(tmp)
+	return os.Rename(tmp, devicePath)
 }
 
 func readSelfIdentity(p string) (selfIdentity, error) {
@@ -121,17 +115,41 @@ func createSelfIdentity(p string) (selfIdentity, error) {
 		PublicKey:  pub,
 	}
 
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY, 0o644)
+	tmp, err := writePairRecordTemp(p, si)
 	if err != nil {
-		return selfIdentity{}, fmt.Errorf("createSelfIdentity: failed to open file for writing: %w", err)
+		return selfIdentity{}, fmt.Errorf("createSelfIdentity: %w", err)
 	}
-	defer f.Close()
-
-	enc := plist.NewEncoderForFormat(f, plist.BinaryFormat)
-	err = enc.Encode(si)
-	if err != nil {
-		return selfIdentity{}, fmt.Errorf("createSelfIdentity: failed to encode self identity as plist: %w", err)
+	defer os.Remove(tmp)
+	// Only publish a complete identity if another process has not created one.
+	// Every agent sharing this directory must use the winner's keys.
+	if err := os.Link(tmp, p); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return readSelfIdentity(p)
+		}
+		return selfIdentity{}, fmt.Errorf("createSelfIdentity: publish identity: %w", err)
 	}
 
 	return si, nil
+}
+
+func writePairRecordTemp(destination string, value any) (name string, err error) {
+	f, err := os.CreateTemp(path.Dir(destination), "."+path.Base(destination)+"-*")
+	if err != nil {
+		return "", err
+	}
+	name = f.Name()
+	defer func() {
+		_ = f.Close()
+		if err != nil {
+			_ = os.Remove(name)
+		}
+	}()
+	if err = plist.NewEncoderForFormat(f, plist.BinaryFormat).Encode(value); err != nil {
+		return name, err
+	}
+	if err = f.Sync(); err != nil {
+		return name, err
+	}
+	err = f.Close()
+	return name, err
 }

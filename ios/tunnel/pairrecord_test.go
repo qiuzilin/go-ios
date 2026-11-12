@@ -1,8 +1,12 @@
 package tunnel
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -35,4 +39,70 @@ func TestPairRecordManager(t *testing.T) {
 
 		assert.True(t, private.Equal(pm.selfId.privateKey()))
 	})
+}
+
+func TestPairIdentityProcess(t *testing.T) {
+	dir := os.Getenv("GO_IOS_PAIR_TEST_DIR")
+	if dir == "" {
+		return
+	}
+	pm, err := NewPairRecordManager(dir)
+	require.NoError(t, err)
+	fmt.Println(pm.selfId.Identifier)
+}
+
+func TestPairIdentityConcurrentProcesses(t *testing.T) {
+	dir := t.TempDir()
+	var wg sync.WaitGroup
+	outputs := make(chan string, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cmd := exec.Command(os.Args[0], "-test.run=^TestPairIdentityProcess$")
+			cmd.Env = append(os.Environ(), "GO_IOS_PAIR_TEST_DIR="+dir)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Errorf("concurrent identity initialization: %v: %s", err, out)
+				return
+			}
+			outputs <- strings.Split(strings.TrimSpace(string(out)), "\n")[0]
+		}()
+	}
+	wg.Wait()
+	close(outputs)
+	pm, err := NewPairRecordManager(dir)
+	require.NoError(t, err)
+	for id := range outputs {
+		require.Equal(t, pm.selfId.Identifier, id)
+	}
+}
+
+func TestPairDeviceWritesAreAtomic(t *testing.T) {
+	dir := t.TempDir()
+	pm, err := NewPairRecordManager(dir)
+	require.NoError(t, err)
+	require.NoError(t, os.Mkdir(path.Join(dir, "peers"), 0o700))
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 10 {
+				err := pm.StoreDeviceInfo(device{Identifier: "device", Name: fmt.Sprint(i), Info: make([]byte, 1024*(i+1))})
+				if err != nil {
+					t.Error(err)
+				}
+				data, err := os.ReadFile(path.Join(dir, "peers", "device.plist"))
+				if err == nil {
+					var got device
+					_, err = plist.Unmarshal(data, &got)
+				}
+				if err != nil {
+					t.Error(err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }

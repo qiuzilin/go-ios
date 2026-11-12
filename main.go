@@ -1934,10 +1934,8 @@ func startTunnel(ctx context.Context, recordsPath string, tunnelInfoHost string,
 	if udid != "" {
 		slog.Info("restricting tunnel agent to a single device", "udid", udid, "tunnelInfoPort", tunnelInfoPort)
 	}
-	// Always derive userspace listener ports from THIS agent's tunnel-info port
-	// (not the global default), so several agents on different ports — e.g. a
-	// general agent plus per-device agents — never collide. An empty udid means
-	// "manage all devices".
+	// An empty udid manages all devices. Userspace forwarding listeners use
+	// OS-allocated ports independently of the tunnel-info server.
 	tm := tunnel.NewTunnelManagerForDevice(pm, userspaceTUN, udid, tunnelInfoPort)
 
 	go func() {

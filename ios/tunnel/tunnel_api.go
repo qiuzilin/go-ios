@@ -105,10 +105,17 @@ func RunAgent(mode string, args ...string) error {
 // 3. GET    {HOST}:{PORT}/tunnels       to get a list of all tunnels
 // The host defaults to 127.0.0.1 and can be changed with --tunnel-info-host / GO_IOS_AGENT_HOST.
 func ServeTunnelInfo(tm *TunnelManager, host string, port int) error {
-	if err := http.ListenAndServe(net.JoinHostPort(host, fmt.Sprintf("%d", port)), tunnelInfoMux(tm)); err != nil {
+	listener, err := net.Listen("tcp", net.JoinHostPort(host, fmt.Sprintf("%d", port)))
+	if err != nil {
 		return fmt.Errorf("ServeTunnelInfo: failed to start http server: %w", err)
 	}
-	return nil
+	return ServeTunnelInfoOnListener(tm, listener)
+}
+
+// ServeTunnelInfoOnListener serves the tunnel API on a bound listener, allowing
+// embedders to reserve an OS-allocated port and announce it without a bind race.
+func ServeTunnelInfoOnListener(tm *TunnelManager, listener net.Listener) error {
+	return http.Serve(listener, tunnelInfoMux(tm))
 }
 
 func tunnelInfoMux(tm *TunnelManager) *http.ServeMux {
@@ -335,35 +342,27 @@ type TunnelManager struct {
 	firstUpdateCompleted bool
 	userspaceTUN         bool
 	closeOnce            sync.Once
-	portOffset           int
 	// udidFilter, when non-empty, restricts the manager to a single device so
 	// you can run one isolated tunnel agent per device.
 	udidFilter string
-	// basePort is the base for derived userspace listener ports (the agent's own
-	// tunnel-info port), so per-device agents on different ports don't collide.
-	basePort int
 }
 
 // NewTunnelManager creates a new TunnelManager instance for setting up device tunnels for all connected devices
 // If userspaceTUN is set to true, the network stack will run in user space.
 func NewTunnelManager(pm PairRecordManager, userspaceTUN bool) *TunnelManager {
-	return newTunnelManager(pm, userspaceTUN, "", ios.HttpApiPort())
+	return newTunnelManager(pm, userspaceTUN, "")
 }
 
-// NewTunnelManagerForDevice creates a TunnelManager bound to a specific
-// tunnel-info port. If udid is non-empty the manager only manages that one
+// NewTunnelManagerForDevice creates a TunnelManager for a specific device.
+// If udid is non-empty the manager only manages that one
 // device (ignoring all others), so you can run one isolated agent per device; an
-// empty udid manages all connected devices. basePort is the agent's tunnel-info
-// port: userspace listener ports are derived from it so multiple agents on
-// different ports (e.g. a general agent plus per-device agents) never clash.
+// empty udid manages all connected devices. Userspace listener ports are allocated
+// by the OS. basePort is retained for source compatibility and is no longer used.
 func NewTunnelManagerForDevice(pm PairRecordManager, userspaceTUN bool, udid string, basePort int) *TunnelManager {
-	return newTunnelManager(pm, userspaceTUN, udid, basePort)
+	return newTunnelManager(pm, userspaceTUN, udid)
 }
 
-func newTunnelManager(pm PairRecordManager, userspaceTUN bool, udidFilter string, basePort int) *TunnelManager {
-	if basePort == 0 {
-		basePort = ios.HttpApiPort()
-	}
+func newTunnelManager(pm PairRecordManager, userspaceTUN bool, udidFilter string) *TunnelManager {
 	return &TunnelManager{
 		ts:                 manualPairingTunnelStart{},
 		dl:                 deviceList{},
@@ -374,8 +373,6 @@ func newTunnelManager(pm PairRecordManager, userspaceTUN bool, udidFilter string
 		startTunnelTimeout: 10 * time.Second,
 		userspaceTUN:       userspaceTUN,
 		udidFilter:         udidFilter,
-		basePort:           basePort,
-		portOffset:         1,
 	}
 }
 
@@ -463,12 +460,6 @@ func (m *TunnelManager) UpdateTunnels(ctx context.Context) error {
 		// connection open when the device disconnects during setup.
 		if shouldSkipDevice(d, localFailed, time.Now()) {
 			continue
-		}
-		if m.userspaceTUN && d.UserspaceTUNPort == 0 {
-			m.mux.Lock()
-			d.UserspaceTUNPort = m.basePort + m.portOffset
-			m.portOffset++
-			m.mux.Unlock()
 		}
 		t, err := m.startTunnel(ctx, d)
 		if err != nil {
@@ -637,10 +628,7 @@ func (m manualPairingTunnelStart) StartTunnel(ctx context.Context, device ios.De
 
 	if version.GreaterThan(semver.MustParse("17.4.0")) {
 		if userspaceTUN {
-			tun, err := ConnectUserSpaceTunnelLockdown(device, device.UserspaceTUNPort)
-			tun.UserspaceTUN = true
-			tun.UserspaceTUNPort = device.UserspaceTUNPort
-			return tun, err
+			return ConnectUserSpaceTunnelLockdown(device, device.UserspaceTUNPort)
 		}
 		return ConnectTunnelLockdown(device)
 	}

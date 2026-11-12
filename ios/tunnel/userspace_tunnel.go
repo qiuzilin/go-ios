@@ -189,6 +189,8 @@ func (iface *UserSpaceTUNInterface) Init(mtu uint32, connToTUNIface io.ReadWrite
 	return nil
 }
 
+// ConnectUserSpaceTunnelLockdown opens a userspace tunnel. ifacePort may be zero
+// to let the OS allocate a port; the bound port is returned in UserspaceTUNPort.
 func ConnectUserSpaceTunnelLockdown(device ios.DeviceEntry, ifacePort int) (Tunnel, error) {
 	conn, err := ios.ConnectToService(device, coreDeviceProxy)
 	if err != nil {
@@ -198,6 +200,34 @@ func ConnectUserSpaceTunnelLockdown(device ios.DeviceEntry, ifacePort int) (Tunn
 }
 
 func connectToUserspaceTunnelLockdown(ctx context.Context, device ios.DeviceEntry, connToDevice io.ReadWriteCloser, ifacePort int) (Tunnel, error) {
+	var listener net.Listener
+	iface := UserSpaceTUNInterface{}
+	initialized := false
+	defer func() {
+		if initialized {
+			return
+		}
+		// Every failure owns the device connection, including a failed bind or
+		// handshake. Close it before waiting for any packet-pump goroutines.
+		_ = connToDevice.Close()
+		if iface.networkStack != nil {
+			iface.networkStack.Close()
+		}
+		if iface.endpoint != nil {
+			iface.endpoint.Wait()
+		}
+		if listener != nil {
+			_ = listener.Close()
+		}
+	}()
+
+	// Keep the listener open throughout setup: probing a free port and closing
+	// it would allow another agent (or our own RPC server) to claim it.
+	listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", ifacePort))
+	if err != nil {
+		return Tunnel{}, fmt.Errorf("could not setup listener. %w", err)
+	}
+	ifacePort = listener.Addr().(*net.TCPAddr).Port
 	golog.Info("connect to lockdown tunnel endpoint on device", "module", logModule, "udid", device.Properties.SerialNumber, "ifacePort", ifacePort)
 	tunnelInfo, err := exchangeCoreTunnelParameters(connToDevice)
 	if err != nil {
@@ -210,15 +240,9 @@ func connectToUserspaceTunnelLockdown(ctx context.Context, device ios.DeviceEntr
 	// Read == one packet, and without reframing TCP coalescing corrupts and drops
 	// packets (see framing.go; the kernel path reframes in forwardTCPToInterface).
 	framedConn := newFramedIPv6Conn(connToDevice)
-	iface := UserSpaceTUNInterface{}
 	err = iface.Init(uint32(tunnelInfo.ClientParameters.Mtu), framedConn, tunnelInfo.ClientParameters.Address, prefixLength)
 	if err != nil {
 		return Tunnel{}, fmt.Errorf("could not setup tunnel interface. %w", err)
-	}
-
-	listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", ifacePort))
-	if err != nil {
-		return Tunnel{}, fmt.Errorf("could not setup listener. %w", err)
 	}
 
 	go listenToConns(iface, listener)
@@ -263,12 +287,15 @@ func connectToUserspaceTunnelLockdown(ctx context.Context, device ios.DeviceEntr
 		explicitClose.Store(true)
 		return doClose()
 	}
+	initialized = true
 	return Tunnel{
-		Address: tunnelInfo.ServerAddress,
-		RsdPort: int(tunnelInfo.ServerRSDPort),
-		Udid:    device.Properties.SerialNumber,
-		closer:  closeFunc,
-		closed:  statsDone,
+		Address:          tunnelInfo.ServerAddress,
+		RsdPort:          int(tunnelInfo.ServerRSDPort),
+		Udid:             device.Properties.SerialNumber,
+		UserspaceTUN:     true,
+		UserspaceTUNPort: ifacePort,
+		closer:           closeFunc,
+		closed:           statsDone,
 	}, nil
 }
 
